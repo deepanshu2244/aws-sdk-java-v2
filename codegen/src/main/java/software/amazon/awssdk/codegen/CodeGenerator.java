@@ -15,16 +15,12 @@
 
 package software.amazon.awssdk.codegen;
 
+import com.squareup.javapoet.ClassName;
 import java.io.File;
-import java.io.IOException;
-import java.io.PrintWriter;
-import software.amazon.awssdk.codegen.emitters.CodeEmitter;
+import java.util.concurrent.ForkJoinTask;
 import software.amazon.awssdk.codegen.emitters.GeneratorTask;
-import software.amazon.awssdk.codegen.emitters.GeneratorTaskExecutor;
 import software.amazon.awssdk.codegen.emitters.GeneratorTaskParams;
-import software.amazon.awssdk.codegen.emitters.tasks.ApiGatewayGeneratorTasks;
 import software.amazon.awssdk.codegen.emitters.tasks.AwsGeneratorTasks;
-import software.amazon.awssdk.codegen.internal.Jackson;
 import software.amazon.awssdk.codegen.internal.Utils;
 import software.amazon.awssdk.codegen.model.intermediate.IntermediateModel;
 import software.amazon.awssdk.codegen.model.intermediate.Protocol;
@@ -36,16 +32,18 @@ public class CodeGenerator {
     private final C2jModels models;
     private final String sourcesDirectory;
     private final String testsDirectory;
-    /**
-     * The prefix for the file name that contains the intermediate model.
-     */
-    private final String fileNamePrefix;
+
+    static {
+        // Make sure ClassName is statically initialized before we do anything in parallel.
+        // Parallel static initialization of ClassName and TypeName can result in a deadlock:
+        // https://github.com/square/javapoet/issues/799
+        ClassName.get(Object.class);
+    }
 
     public CodeGenerator(Builder builder) {
         this.models = builder.models;
         this.sourcesDirectory = builder.sourcesDirectory;
         this.testsDirectory = builder.testsDirectory;
-        this.fileNamePrefix = builder.fileNamePrefix;
     }
 
     public static File getModelDirectory(String outputDirectory) {
@@ -69,9 +67,6 @@ public class CodeGenerator {
         try {
             IntermediateModel intermediateModel = new IntermediateModelBuilder(models).build();
 
-            // Dump the intermediate model to a file
-            writeIntermediateModel(intermediateModel);
-
             emitCode(intermediateModel);
 
         } catch (Exception e) {
@@ -81,51 +76,16 @@ public class CodeGenerator {
         }
     }
 
-    private void writeIntermediateModel(IntermediateModel model)
-            throws IOException {
-        File modelDir = getModelDirectory(sourcesDirectory);
-        PrintWriter writer = null;
-        try {
-            File outDir = new File(sourcesDirectory);
-            if (!outDir.exists()) {
-                if (!outDir.mkdirs()) {
-                    throw new RuntimeException("Failed to create "
-                                               + outDir.getAbsolutePath());
-                }
-            }
-
-            File outputFile = new File(modelDir, fileNamePrefix + "-intermediate.json");
-
-            if (!outputFile.exists()) {
-                if (!outputFile.createNewFile()) {
-                    throw new RuntimeException("Error creating file "
-                                               + outputFile.getAbsolutePath());
-                }
-            }
-
-            writer = new PrintWriter(outputFile, "UTF-8");
-            Jackson.write(model, writer);
-        } finally {
-            if (writer != null) {
-                writer.flush();
-                writer.close();
-            }
-        }
-    }
-
     private void emitCode(IntermediateModel intermediateModel) {
-        Iterable<GeneratorTask> generatorTasks = createGeneratorTasks(intermediateModel);
-        try (CodeEmitter emitter = new CodeEmitter(generatorTasks, new GeneratorTaskExecutor())) {
-            emitter.emit();
-        }
+        ForkJoinTask.invokeAll(createGeneratorTasks(intermediateModel));
     }
 
-    private Iterable<GeneratorTask> createGeneratorTasks(IntermediateModel intermediateModel) {
+    private GeneratorTask createGeneratorTasks(IntermediateModel intermediateModel) {
         // For clients built internally, the output directory and source directory are the same.
         GeneratorTaskParams params = GeneratorTaskParams.create(intermediateModel, sourcesDirectory, testsDirectory);
 
         if (params.getModel().getMetadata().getProtocol() == Protocol.API_GATEWAY) {
-            return new ApiGatewayGeneratorTasks(params);
+            throw new UnsupportedOperationException("Unsupported protocol: " + Protocol.API_GATEWAY);
         } else {
             return new AwsGeneratorTasks(params);
         }
@@ -139,7 +99,6 @@ public class CodeGenerator {
         private C2jModels models;
         private String sourcesDirectory;
         private String testsDirectory;
-        private String fileNamePrefix;
 
         private Builder() {
         }
@@ -156,11 +115,6 @@ public class CodeGenerator {
 
         public Builder testsDirectory(String smokeTestsDirectory) {
             this.testsDirectory = smokeTestsDirectory;
-            return this;
-        }
-
-        public Builder fileNamePrefix(String fileNamePrefix) {
-            this.fileNamePrefix = fileNamePrefix;
             return this;
         }
 
